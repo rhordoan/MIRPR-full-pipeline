@@ -1,0 +1,26 @@
+imageType:
+  Original: {}
+  Wavelet: {}
+  LoG: {}
+
+featureClass:
+  shape: []
+  firstorder: []
+  glcm: []
+  glrlm: []
+  glszm: []
+  gldm: []
+  ngtdm: []
+
+setting:
+  binWidth: 25
+  label: 1
+  correctMask: true
+  minimumROISize: 10
+  resampledPixelSpacing: [0.7, 0.7, 0.7]
+  interpolator: sitkBSpline
+  normalize: false
+  sigma: [1.0, 2.0, 3.0]
+
+
+

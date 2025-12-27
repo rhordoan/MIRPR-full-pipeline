@@ -1,0 +1,33 @@
+# Python and virtual envs
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.python-version
+
+# Editors/IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Logs and temp
+logs/
+*.log
+*.pid
+
+# Large artifacts / data / outputs
+data/
+outputs/
+weights/
+best_model.zip
+*.pth
+*.nii.gz
+*.nii
+*.zip
+
+# Checkpoints / background run markers
+*.lock
+nohup.out
+
+

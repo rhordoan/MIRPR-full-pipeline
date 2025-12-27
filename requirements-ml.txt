@@ -1,0 +1,11 @@
+# Optional ML dependencies for training tabular models (XGBoost) on radiomics.
+#
+# Install:
+#   source /home/shadeform/.venvs/vista-3d/bin/activate
+#   pip install -r /home/shadeform/models/vista-3d/requirements-ml.txt
+
+pandas>=2.0.0
+numpy>=1.23.0
+xgboost>=2.0.0
+
+
