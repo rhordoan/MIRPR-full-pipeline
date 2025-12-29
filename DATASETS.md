@@ -41,6 +41,31 @@ Flags:
 - `--lung-crop-min-lung-frac`: how “lung-like” a slice must be to be included (default: 0.12). Lower = more inclusive.
 - `--amp`: enable CUDA autocast for inference (ignored on CPU).
 
+### Label coverage sanity check (for deciding single-task vs multi-task DL)
+
+If you’re deciding whether to train a **multi-task** deep model (EGFR/KRAS/MKI67), you should first check how many **labeled patients** you have per task and how much **overlap** exists (patients with all labels).
+
+Use:
+- `scripts/label_stats.py`
+
+Example (NSCLC Radiogenomics EGFR/KRAS):
+
+```bash
+python scripts/label_stats.py \
+  --csv /home/shadeform/models/vista-3d/outputs/nsclc_radiogenomics_labels.csv \
+  --label-cols egfr_mutated,kras_mutated \
+  --group-col patient_id
+```
+
+Example (TCGA-LUAD MKI67 expression proxy):
+
+```bash
+python scripts/label_stats.py \
+  --csv /home/shadeform/models/vista-3d/outputs/tcga_luad_labels.csv \
+  --label-cols mki67_expr \
+  --group-col patient_id
+```
+
 ### 1) NSCLC Radiogenomics (TCIA)
 
 Downloads CT series from TCIA’s public NBIA API and extracts DICOMs into:
