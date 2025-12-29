@@ -11,6 +11,36 @@ All scripts assume you’re using the venv you already created:
 source /home/shadeform/.venvs/vista-3d/bin/activate
 ```
 
+### Inference (Vista3D) — speed/quality knobs
+
+Script:
+- `scripts/run_inference_on_series.py`
+
+Notes:
+- Some CT series include many slices with little/no chest (e.g., long coverage, positioning, or extra recon ranges).
+  Running 3D sliding-window inference over the entire z-extent wastes a lot of compute.
+- `run_inference_on_series.py` now includes an **optional heuristic auto-crop along z** to likely lung-containing slices
+  (with a safety margin). If it can’t confidently detect lungs, it falls back to the full scan.
+- On NVIDIA GPUs, enabling **AMP** (mixed precision) usually improves throughput.
+
+Recommended command (fast on GPU, safe defaults):
+
+```bash
+python /home/shadeform/models/vista-3d/scripts/run_inference_on_series.py \
+  --series-dir /path/to/<SeriesUID> \
+  --weights /home/shadeform/models/vista-3d/weights/best_model.pth \
+  --out-dir /home/shadeform/models/vista-3d/outputs \
+  --save-ct \
+  --clean \
+  --amp
+```
+
+Flags:
+- `--disable-lung-crop`: disable the z-cropping and run on the full scan (use this if you suspect missed anatomy).
+- `--lung-crop-margin-mm`: margin (mm) added above/below the detected lung range (default: 30mm).
+- `--lung-crop-min-lung-frac`: how “lung-like” a slice must be to be included (default: 0.12). Lower = more inclusive.
+- `--amp`: enable CUDA autocast for inference (ignored on CPU).
+
 ### 1) NSCLC Radiogenomics (TCIA)
 
 Downloads CT series from TCIA’s public NBIA API and extracts DICOMs into:

@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -29,6 +29,85 @@ TARGET_CLASS = 23  # Lung Tumor
 TARGET_SPACING = (0.7, 0.7, 0.7)  # (z, y, x) mm
 INTENSITY_RANGE = (-1000, 1000)
 ROI_SIZE = (192, 192, 192)
+
+
+def estimate_lung_z_bounds(
+    vol_zyx: np.ndarray,
+    spacing_zyx: Tuple[float, float, float],
+    *,
+    patient_hu_thresh: float = -900.0,
+    lung_hu_thresh: float = -500.0,
+    min_patient_frac: float = 0.02,
+    min_lung_frac: float = 0.12,
+    min_run_slices: int = 10,
+    margin_mm: float = 30.0,
+) -> Optional[Tuple[int, int]]:
+    """
+    Heuristic: find a contiguous z-range likely to contain lungs, to avoid running
+    sliding-window inference over long regions with little/no lung.
+
+    This is intentionally conservative:
+    - "patient" pixels are those > patient_hu_thresh (to exclude outside-air)
+    - "lung-like" pixels are those < lung_hu_thresh within patient pixels
+    - select slices with lung_fraction >= min_lung_frac
+    - expand by margin_mm on both ends
+
+    Returns (z0, z1) inclusive bounds in the original volume index space, or None.
+    """
+    if vol_zyx.ndim != 3:
+        return None
+
+    z, y, x = vol_zyx.shape
+    if z < 4:
+        return None
+
+    # patient_mask: excludes outside-air padding/background
+    patient = vol_zyx > patient_hu_thresh
+    patient_counts = patient.reshape(z, -1).sum(axis=1).astype(np.float32)
+    patient_frac = patient_counts / float(y * x)
+
+    # Only consider slices with some patient present.
+    ok_patient = patient_frac >= float(min_patient_frac)
+    if not bool(ok_patient.any()):
+        return None
+
+    # lung_like: low-HU regions within patient (lungs tend to dominate in chest slices)
+    lung_like = (vol_zyx < lung_hu_thresh) & patient
+    lung_counts = lung_like.reshape(z, -1).sum(axis=1).astype(np.float32)
+    lung_frac = np.zeros((z,), dtype=np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lung_frac[ok_patient] = lung_counts[ok_patient] / np.maximum(patient_counts[ok_patient], 1.0)
+
+    candidates = np.where(ok_patient & (lung_frac >= float(min_lung_frac)))[0]
+    if candidates.size == 0:
+        return None
+
+    # Keep the largest contiguous run of candidate slices (helps ignore bowel gas).
+    runs: List[Tuple[int, int]] = []
+    start = int(candidates[0])
+    prev = int(candidates[0])
+    for idx in candidates[1:]:
+        idx_i = int(idx)
+        if idx_i == prev + 1:
+            prev = idx_i
+            continue
+        runs.append((start, prev))
+        start = idx_i
+        prev = idx_i
+    runs.append((start, prev))
+    runs.sort(key=lambda ab: (ab[1] - ab[0] + 1), reverse=True)
+    z0, z1 = runs[0]
+    if (z1 - z0 + 1) < int(min_run_slices):
+        return None
+
+    # Expand by margin in mm (converted to slices using input z-spacing).
+    sz = float(spacing_zyx[0]) if spacing_zyx and spacing_zyx[0] > 0 else 1.0
+    margin_slices = int(round(float(margin_mm) / sz))
+    z0 = max(0, int(z0) - margin_slices)
+    z1 = min(z - 1, int(z1) + margin_slices)
+    if z1 <= z0:
+        return None
+    return int(z0), int(z1)
 
 
 def load_dicom_series(series_dir: str) -> Tuple[np.ndarray, Tuple[float, float, float]]:
@@ -76,6 +155,21 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--weights", default="/home/shadeform/models/vista-3d/weights/best_model.pth")
     ap.add_argument("--out-dir", default="/home/shadeform/models/vista-3d/outputs")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--disable-lung-crop",
+        action="store_true",
+        help=(
+            "Disable heuristic z-cropping to likely lung slices. "
+            "By default we try to crop to speed up inference on long scans with lots of non-lung slices."
+        ),
+    )
+    ap.add_argument("--lung-crop-margin-mm", type=float, default=30.0, help="Margin (mm) added above/below detected lung z-range.")
+    ap.add_argument("--lung-crop-min-lung-frac", type=float, default=0.12, help="Min lung-like fraction (within patient) to mark a slice as lung.")
+    ap.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable CUDA autocast (mixed precision) during sliding window inference (faster on most GPUs).",
+    )
     ap.add_argument("--png", action="store_true", help="Also save 2D overlay PNGs (up to 4 informative slices)")
     ap.add_argument("--clean", action="store_true", help="Run mask postprocessing (size filter, morph, optional dilation)")
     ap.add_argument("--min-vol-mm3", type=float, default=50.0, help="Minimum component volume to keep (mm^3). Default: 50")
@@ -92,6 +186,24 @@ def main(argv: List[str] | None = None) -> int:
     vol_np, spacing = load_dicom_series(args.series_dir)
     vol_np = np.clip(vol_np, INTENSITY_RANGE[0], INTENSITY_RANGE[1])
 
+    # Optional: crop along z to likely lung-containing region (saves resample + SW inference work).
+    z_crop0 = 0
+    z_crop1 = vol_np.shape[0] - 1
+    if not args.disable_lung_crop:
+        bounds = estimate_lung_z_bounds(
+            vol_zyx=vol_np,
+            spacing_zyx=spacing,
+            min_lung_frac=float(args.lung_crop_min_lung_frac),
+            margin_mm=float(args.lung_crop_margin_mm),
+        )
+        if bounds is not None:
+            z_crop0, z_crop1 = bounds
+            if z_crop0 != 0 or z_crop1 != (vol_np.shape[0] - 1):
+                vol_np = vol_np[z_crop0 : z_crop1 + 1]
+                print(f"Auto-cropped z-range to likely lungs: z=[{z_crop0}, {z_crop1}] (slices={vol_np.shape[0]})", flush=True)
+        else:
+            print("Auto-crop: could not confidently detect lung z-range; using full scan.", flush=True)
+
     vol_t = torch.from_numpy(vol_np).unsqueeze(0).unsqueeze(0)  # (1,1,z,y,x)
     vol_t = resample_volume(vol_t, spacing, TARGET_SPACING)
 
@@ -103,16 +215,29 @@ def main(argv: List[str] | None = None) -> int:
     model.load_state_dict(state)
     model.eval()
 
+    use_amp = bool(args.amp) and device.type == "cuda"
     with torch.no_grad():
-        logits = sliding_window_inference(
-            inputs=vol_t,
-            roi_size=ROI_SIZE,
-            sw_batch_size=1,
-            predictor=model,
-            overlap=0.5,
-            transpose=True,
-            class_vector=torch.tensor([TARGET_CLASS], device=device),
-        )
+        if use_amp:
+            with torch.amp.autocast("cuda"):
+                logits = sliding_window_inference(
+                    inputs=vol_t,
+                    roi_size=ROI_SIZE,
+                    sw_batch_size=1,
+                    predictor=model,
+                    overlap=0.5,
+                    transpose=True,
+                    class_vector=torch.tensor([TARGET_CLASS], device=device),
+                )
+        else:
+            logits = sliding_window_inference(
+                inputs=vol_t,
+                roi_size=ROI_SIZE,
+                sw_batch_size=1,
+                predictor=model,
+                overlap=0.5,
+                transpose=True,
+                class_vector=torch.tensor([TARGET_CLASS], device=device),
+            )
         probs = torch.sigmoid(logits)
         preds = (probs > 0.5).float()
 

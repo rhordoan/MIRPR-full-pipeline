@@ -8,7 +8,7 @@ This file captures the working context to accompany the codebase and help new co
 
 ## Key scripts (all under `scripts/`)
 - Data acquisition: `tcia_download_collection.py`, `download_nsclc_radiogenomics.py`, `download_tcga_luad_tcia.py`, `gdc_tcga_luad_manifest.py`, `install_gdc_client.sh`, `start_downloads_bg.sh`, `stop_downloads_bg.sh`.
-- Inference: `run_inference_on_series.py` (mask cleaning, PNG overlays, optional CT save), `run_all_inference_bg.sh`, `run_all_inference_parallel.py`.
+- Inference: `run_inference_on_series.py` (mask cleaning, PNG overlays, optional CT save, optional auto-crop to lung z-range, optional AMP), `run_all_inference_bg.sh`, `run_all_inference_parallel.py`.
 - Radiomics: `run_pyradiomics_one.py`, `run_pyradiomics_batch.py` (subprocess workers, resume, sanitization), `normalize_radiomics_jsons.py`.
 - Labels: `derive_tcga_luad_labels.py`, `derive_nsclc_radiogenomics_labels.py`.
 - ML prep & training: `prepare_xgb_dataset.py`, `feature_selection.py`, `train_xgboost.py`, `start_xgb_training_bg.sh`.
