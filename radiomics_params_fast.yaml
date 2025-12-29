@@ -1,0 +1,35 @@
+imageType:
+  # Fast baseline: extract features only from the original image.
+  # Disabling Wavelet / LoG makes extraction ~10x+ faster in many CT pipelines.
+  Original: {}
+
+featureClass:
+  # Keep all standard non-filtered classes.
+  shape: []
+  firstorder: []
+  glcm: []
+  glrlm: []
+  glszm: []
+  gldm: []
+  ngtdm: []
+
+setting:
+  # CT radiomics best practice: fixed binWidth in HU.
+  binWidth: 25
+  label: 1
+
+  # Your pipeline already writes *_ct_resampled.nii.gz at 0.7mm isotropic in
+  # scripts/run_inference_on_series.py. Avoid resampling again in PyRadiomics.
+  # (So: do NOT set resampledPixelSpacing/interpolator here.)
+
+  # Optional speed/safety toggles:
+  correctMask: false
+  minimumROISize: 10
+  normalize: false
+
+  # Crop to the mask bounding box before feature calculation (can significantly
+  # reduce work when your CT volume is large vs ROI).
+  preCrop: true
+  padDistance: 5
+
+

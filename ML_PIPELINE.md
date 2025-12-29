@@ -11,6 +11,31 @@ This document lists **all scripts used to prepare datasets** for training and th
 - **TCIA imaging tree** (used to infer `patient_id` / `series_uid` mapping):
   - `models/vista-3d/data/tcia/NSCLC Radiogenomics/<PatientID>/<StudyUID>/<SeriesUID>/`
 
+## 0) Radiomics extraction (PyRadiomics) + speed notes
+
+Script:
+- `models/vista-3d/scripts/run_pyradiomics_batch.py`
+
+Typical command:
+
+```bash
+source /home/shadeform/.venvs/vista-3d/bin/activate
+python /home/shadeform/models/vista-3d/scripts/run_pyradiomics_batch.py \
+  --inputs /home/shadeform/models/vista-3d/outputs \
+  --params /home/shadeform/models/vista-3d/radiomics_params.yaml \
+  --workers 8 \
+  --itk-threads 1 \
+  --lib-threads 1 \
+  --out-csv /home/shadeform/models/vista-3d/outputs/radiomics_features.csv
+```
+
+Speed notes (what dominates runtime):
+- `imageType: Wavelet` and `imageType: LoG` (especially multiple `sigma`) can easily make extraction **~10x+ slower**, because features are computed on many filtered images (e.g., 1 original + 8 wavelets + N LoG sigmas).
+- `setting: resampledPixelSpacing` can be expensive. In this repo, `scripts/run_inference_on_series.py --save-ct` already writes `*_ct_resampled.nii.gz` at **0.7mm isotropic**, so re-resampling inside PyRadiomics is usually redundant.
+
+For quick iteration, use the faster params file:
+- `radiomics_params_fast.yaml` (Original-only, no redundant resampling, pre-crop enabled)
+
 ## 1) NSCLC Radiogenomics labels (EGFR/KRAS + clinical)
 
 Script:

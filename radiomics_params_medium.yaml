@@ -1,0 +1,28 @@
+imageType:
+  # Middle ground: keep Wavelet (often useful) but drop LoG (often expensive).
+  Original: {}
+  Wavelet: {}
+
+featureClass:
+  shape: []
+  firstorder: []
+  glcm: []
+  glrlm: []
+  glszm: []
+  gldm: []
+  ngtdm: []
+
+setting:
+  binWidth: 25
+  label: 1
+
+  # Avoid redundant resampling: CT is already 0.7mm isotropic in this repo's outputs.
+  correctMask: true
+  minimumROISize: 10
+  normalize: false
+
+  # Speed: crop to mask bounding box before feature calculation
+  preCrop: true
+  padDistance: 5
+
+

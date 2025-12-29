@@ -33,7 +33,34 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--inputs", required=True, help="Directory containing *_mask_clean.nii.gz and *_ct_resampled.nii.gz")
     ap.add_argument("--params", required=True, help="PyRadiomics params YAML")
     ap.add_argument("--out-csv", required=True, help="Output CSV path for aggregated features")
-    ap.add_argument("--workers", type=int, default=1, help="Parallel workers (processes). Use 30 on your machine.")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel workers (subprocesses). "
+            "Tip: start with workers≈physical_cores/2 for heavy configs (Wavelet/LoG), "
+            "or workers≈cores for fast configs (Original-only)."
+        ),
+    )
+    ap.add_argument(
+        "--itk-threads",
+        type=int,
+        default=1,
+        help=(
+            "Threads per worker for ITK/SimpleITK (PyRadiomics). "
+            "When --workers > 1, keep this low (often 1) to avoid oversubscription."
+        ),
+    )
+    ap.add_argument(
+        "--lib-threads",
+        type=int,
+        default=1,
+        help=(
+            "Threads per worker for common numeric libs (OpenMP/BLAS/NumExpr). "
+            "When --workers > 1, keep this low (often 1)."
+        ),
+    )
     ap.add_argument(
         "--per-series-dir",
         default=None,
@@ -109,13 +136,15 @@ def main(argv: List[str] | None = None) -> int:
         out_json = os.path.join(per_series_dir, f"{series}.json")
         out_log = os.path.join(per_series_dir, f"{series}.log")
         env = os.environ.copy()
-        # Hard cap threads per subprocess (prevents 30 workers * many threads).
-        env.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
-        env.setdefault("OMP_NUM_THREADS", "1")
-        env.setdefault("OPENBLAS_NUM_THREADS", "1")
-        env.setdefault("MKL_NUM_THREADS", "1")
-        env.setdefault("NUMEXPR_NUM_THREADS", "1")
-        env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+        # Hard cap threads per subprocess (prevents --workers * many threads).
+        # Tune with --itk-threads / --lib-threads.
+        env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(int(args.itk_threads))
+        lib_t = str(int(args.lib_threads))
+        env["OMP_NUM_THREADS"] = lib_t
+        env["OPENBLAS_NUM_THREADS"] = lib_t
+        env["MKL_NUM_THREADS"] = lib_t
+        env["NUMEXPR_NUM_THREADS"] = lib_t
+        env["VECLIB_MAXIMUM_THREADS"] = lib_t
 
         cmd = [
             sys.executable,

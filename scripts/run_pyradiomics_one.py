@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import tempfile
+import time
 from typing import Any, Dict, List, Optional
 
 from radiomics import featureextractor
@@ -64,12 +65,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--out-json", required=True)
     args = ap.parse_args(argv)
 
+    t0 = time.perf_counter()
     extractor = featureextractor.RadiomicsFeatureExtractor(args.params)
+    t1 = time.perf_counter()
     res: Dict[str, Any] = extractor.execute(args.image, args.mask)
+    t2 = time.perf_counter()
     feats = {k: v for k, v in res.items() if k.startswith(("original", "wavelet", "log"))}
     feats["series"] = args.series
     feats["mask_path"] = os.path.abspath(args.mask)
     feats["image_path"] = os.path.abspath(args.image)
+    # Timing fields for quick benchmarking (not used as ML features by default).
+    feats["radiomics_init_seconds"] = float(t1 - t0)
+    feats["radiomics_execute_seconds"] = float(t2 - t1)
+    feats["radiomics_total_seconds"] = float(t2 - t0)
 
     os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
     # Write atomically to avoid truncated JSON if the process crashes mid-write.

@@ -1,0 +1,36 @@
+imageType:
+  # Same as radiomics_params.yaml (full feature set)
+  Original: {}
+  Wavelet: {}
+  LoG: {}
+
+featureClass:
+  shape: []
+  firstorder: []
+  glcm: []
+  glrlm: []
+  glszm: []
+  gldm: []
+  ngtdm: []
+
+setting:
+  binWidth: 25
+  label: 1
+
+  # IMPORTANT: avoid resampling inside PyRadiomics.
+  # This repo already saves `*_ct_resampled.nii.gz` at 0.7mm isotropic in
+  # scripts/run_inference_on_series.py (--save-ct), so resampling again here
+  # is redundant and expensive.
+
+  correctMask: true
+  minimumROISize: 10
+  normalize: false
+
+  # LoG scales (kept identical to original config)
+  sigma: [1.0, 2.0, 3.0]
+
+  # Speed: crop to mask bounding box before feature calculation
+  preCrop: true
+  padDistance: 5
+
+
