@@ -25,7 +25,7 @@ from monai.inferers import sliding_window_inference
 from monai.networks.nets import vista3d132
 
 
-TARGET_CLASS = 23  # Lung Tumor
+TARGET_CLASS = 23  # Default target class (checkpoint-dependent)
 TARGET_SPACING = (0.7, 0.7, 0.7)  # (z, y, x) mm
 INTENSITY_RANGE = (-1000, 1000)
 ROI_SIZE = (192, 192, 192)
@@ -150,11 +150,25 @@ def resample_volume(vol: torch.Tensor, spacing: Tuple[float, float, float], targ
 
 
 def main(argv: List[str] | None = None) -> int:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     ap = argparse.ArgumentParser()
     ap.add_argument("--series-dir", required=True, help="Path to a single DICOM series directory")
-    ap.add_argument("--weights", default="/home/shadeform/models/vista-3d/weights/best_model.pth")
-    ap.add_argument("--out-dir", default="/home/shadeform/models/vista-3d/outputs")
+    ap.add_argument("--weights", default=os.path.join(repo_root, "weights", "best_model.pth"))
+    ap.add_argument("--out-dir", default=os.path.join(repo_root, "outputs"))
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--target-class",
+        type=int,
+        default=TARGET_CLASS,
+        help="Vista3D target class id to segment (checkpoint-dependent).",
+    )
+    ap.add_argument(
+        "--prob-thresh",
+        type=float,
+        default=0.5,
+        help="Probability threshold for binarizing output (default: 0.5).",
+    )
+    ap.add_argument("--debug-stats", action="store_true", help="Print quick logits/probs stats for debugging.")
     ap.add_argument(
         "--disable-lung-crop",
         action="store_true",
@@ -182,6 +196,11 @@ def main(argv: List[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     os.makedirs(args.out_dir, exist_ok=True)
+    if not os.path.exists(args.weights):
+        raise SystemExit(
+            f"Weights not found at {args.weights!r}. "
+            "Place a checkpoint there or pass --weights /path/to/checkpoint.pth"
+        )
 
     vol_np, spacing = load_dicom_series(args.series_dir)
     vol_np = np.clip(vol_np, INTENSITY_RANGE[0], INTENSITY_RANGE[1])
@@ -204,11 +223,15 @@ def main(argv: List[str] | None = None) -> int:
         else:
             print("Auto-crop: could not confidently detect lung z-range; using full scan.", flush=True)
 
-    vol_t = torch.from_numpy(vol_np).unsqueeze(0).unsqueeze(0)  # (1,1,z,y,x)
-    vol_t = resample_volume(vol_t, spacing, TARGET_SPACING)
+    # Resample HU volume for outputs/radiomics.
+    vol_t_hu_cpu = torch.from_numpy(vol_np).unsqueeze(0).unsqueeze(0)  # (1,1,z,y,x) on CPU
+    vol_t_hu_cpu = resample_volume(vol_t_hu_cpu, spacing, TARGET_SPACING)
 
+    # Model expects normalized intensities (see inference.py): map [-1000, 1000] -> [0, 1].
     device = torch.device(args.device)
-    vol_t = vol_t.to(device, dtype=torch.float32)
+    vol_t = vol_t_hu_cpu.to(device, dtype=torch.float32)
+    vol_t = (vol_t - float(INTENSITY_RANGE[0])) / float(INTENSITY_RANGE[1] - INTENSITY_RANGE[0])
+    vol_t = torch.clamp(vol_t, 0.0, 1.0)
 
     model = vista3d132(encoder_embed_dim=48, in_channels=1).to(device)
     state = torch.load(args.weights, map_location=device, weights_only=True)
@@ -226,7 +249,7 @@ def main(argv: List[str] | None = None) -> int:
                     predictor=model,
                     overlap=0.5,
                     transpose=True,
-                    class_vector=torch.tensor([TARGET_CLASS], device=device),
+                    class_vector=torch.tensor([int(args.target_class)], device=device),
                 )
         else:
             logits = sliding_window_inference(
@@ -236,13 +259,42 @@ def main(argv: List[str] | None = None) -> int:
                 predictor=model,
                 overlap=0.5,
                 transpose=True,
-                class_vector=torch.tensor([TARGET_CLASS], device=device),
+                class_vector=torch.tensor([int(args.target_class)], device=device),
             )
         probs = torch.sigmoid(logits)
-        preds = (probs > 0.5).float()
+        if args.debug_stats:
+            try:
+                lmin = float(logits.min().item())
+                lmax = float(logits.max().item())
+                pmin = float(probs.min().item())
+                pmax = float(probs.max().item())
+                pmean = float(probs.mean().item())
+                print(
+                    f"Debug stats: target_class={int(args.target_class)} "
+                    f"logits[min={lmin:.4f}, max={lmax:.4f}] "
+                    f"probs[min={pmin:.4f}, max={pmax:.4f}, mean={pmean:.4f}]",
+                    flush=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        preds = (probs > float(args.prob_thresh)).float()
 
     pred_np = preds.cpu().numpy()[0, 0]
     voxel_vol_mm3 = TARGET_SPACING[0] * TARGET_SPACING[1] * TARGET_SPACING[2]
+    if pred_np.max() <= 0:
+        try:
+            pmax = float(probs.max().item())
+            print(
+                f"[warn] Empty mask after thresholding (prob-thresh={float(args.prob_thresh)}). "
+                f"max_prob={pmax:.4f} target_class={int(args.target_class)}",
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001
+            print(
+                f"[warn] Empty mask after thresholding (prob-thresh={float(args.prob_thresh)}). "
+                f"target_class={int(args.target_class)}",
+                flush=True,
+            )
 
     # Save NIfTI for easy inspection
     series_name = os.path.basename(args.series_dir.rstrip("/"))
@@ -253,7 +305,7 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.save_ct:
         ct_out = os.path.join(args.out_dir, f"{series_name}_ct_resampled.nii.gz")
-        ct_np = vol_t.cpu().numpy()[0, 0]
+        ct_np = vol_t_hu_cpu.numpy()[0, 0]
         nib.save(nib.Nifti1Image(ct_np.astype(np.float32), affine), ct_out)
         print(f"Saved resampled CT to: {ct_out}")
 
@@ -350,7 +402,7 @@ def main(argv: List[str] | None = None) -> int:
     if args.png:
         import matplotlib.pyplot as plt  # local import to avoid forcing display backend
 
-        vol_np_resampled = vol_t.cpu().numpy()[0, 0]  # resampled, clipped volume
+        vol_np_resampled = vol_t_hu_cpu.numpy()[0, 0]  # resampled HU volume (clipped)
         nz = np.argwhere(mask_for_png > 0)
 
         slices_to_save: list[int] = []

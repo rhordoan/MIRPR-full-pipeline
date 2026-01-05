@@ -26,13 +26,18 @@ def _as_bool_series(s: pd.Series) -> Optional[pd.Series]:
     Convert common binary encodings to boolean.
     Returns None if it doesn't look binary.
     """
+    # Use pandas' nullable boolean dtype so we can represent missing values cleanly.
     if s.dtype == bool:
-        return s
+        return s.astype("boolean")
     # Try numeric 0/1
     s_num = pd.to_numeric(s, errors="coerce")
     uniq = pd.unique(s_num.dropna())
+    # If everything is missing, we can't infer a "binary" encoding.
+    if len(uniq) == 0:
+        return None
     if len(uniq) <= 2 and set(map(float, uniq)).issubset({0.0, 1.0}):
-        return s_num.astype("Int64").astype(bool)
+        # IMPORTANT: keep missing values as <NA> (do NOT astype(bool), which cannot represent NA).
+        return s_num.astype("Int64").astype("boolean")
     # Try string-ish True/False/0/1
     s_str = s.astype(str).str.strip().str.lower()
     mapping = {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}

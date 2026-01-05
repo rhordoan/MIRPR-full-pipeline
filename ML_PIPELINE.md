@@ -2,6 +2,10 @@
 
 This document lists **all scripts used to prepare datasets** for training and the exact commands to reproduce outputs.
 
+Note: this repo lives at:
+`/home/shadeform/MIRPR-full-pipeline`
+If you see older paths like `/home/shadeform/models/vista-3d`, replace them with the path above.
+
 ## Inputs (what must exist)
 
 - **Radiomics per-series JSONs** (produced by PyRadiomics batch):
@@ -163,5 +167,59 @@ Install:
 source /home/shadeform/.venvs/vista-3d/bin/activate
 pip install -r /home/shadeform/models/vista-3d/requirements-ml.txt
 ```
+
+## 5) Deep learning branch (mask-aware DenseNet, ROI crop) — for late fusion
+
+Script:
+- `scripts/train_densenet_roi.py`
+
+What it does:
+- Reads `*_ct_resampled.nii.gz` + `*_mask_clean.nii.gz` (from Vista3D inference)
+- Crops around the mask bbox + margin (ROI strategy)
+- Feeds **CT + mask as channels** into a 3D DenseNet
+- Splits **by patient_id** (leakage-safe)
+
+Command (NSCLC Radiogenomics, EGFR):
+
+```bash
+source /home/shadeform/.venvs/vista-3d/bin/activate
+python /home/shadeform/MIRPR-full-pipeline/scripts/train_densenet_roi.py \
+  --inputs /home/shadeform/MIRPR-full-pipeline/outputs/nsclc_radiogenomics_inference \
+  --labels-csv /home/shadeform/MIRPR-full-pipeline/outputs/nsclc_radiogenomics_labels.csv \
+  --label egfr_mutated \
+  --out-dir /home/shadeform/MIRPR-full-pipeline/outputs/dl/nsclc_egfr_densenet_roi \
+  --amp
+```
+
+Outputs:
+- `.../model_best.pt`
+- `.../metrics.json`
+- `.../test_predictions.csv`
+
+## 6) IHC stain weak-label training (CT-only, noisy labels)
+
+Goal: train on IHC stain presence (e.g., Napsin A, CK7, TTF-1, p40, p63, Ki-67) using CT + Vista3D masks as weak supervision.
+
+Inputs:
+- IHC table (e.g., `AnonymizedPatientsTable.xlsx`) with patient ID and stain positivity flags.
+- Vista3D outputs: `*_ct_resampled.nii.gz`, `*_mask_clean.nii.gz` for the same patients.
+
+Label prep:
+- Standardize stain names (lowercase, strip spaces/aliases), drop exact duplicates.
+- Convert to binary per stain: positive -> 1, negative/absent -> 0; leave missing as NaN (do not coerce to 0).
+- If multiple rows per patient, use a consistent rule (any positive → positive).
+
+Split:
+- Always split by `patient_id` (train/val/test) to avoid leakage; keep unlabeled rows out of the loss.
+
+Baselines to try:
+- Radiomics + XGBoost: reuse `prepare_xgb_dataset.py` to build the table (with a stain label column), then `train_xgboost.py --label <stain> --task binary`. Use class weights if the class is imbalanced.
+- Mask-aware DenseNet ROI: reuse `train_densenet_roi.py --label <stain>` to feed CT+mask channels with ROI crop; enable `--amp` and early stopping.
+- Late fusion: average calibrated probabilities from radiomics and DenseNet (keep patient-level splits aligned).
+
+Quality guards:
+- Track prevalence per stain; if too few positives, expect high variance.
+- Use label smoothing and early stopping; calibrate outputs if used downstream.
+- Report AUC/PR with confidence intervals; treat results as weak signals unless validated clinically.
 
 

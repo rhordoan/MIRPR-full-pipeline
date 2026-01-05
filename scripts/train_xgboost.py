@@ -55,7 +55,6 @@ def _binary_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     y = y_true[order]
     n_pos = int(y.sum())
     n_neg = int((1 - y).sum())
-    # rank sum for positives (1-indexed ranks)
     ranks = np.arange(1, len(y) + 1, dtype=float)
     r_pos = float(ranks[y == 1].sum())
     auc = (r_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
@@ -96,21 +95,15 @@ def _split_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
 def _choose_feature_cols(df: pd.DataFrame, label: str, prefixes: Tuple[str, ...], explicit: Optional[List[str]]) -> List[str]:
     if explicit:
         return [c for c in explicit if c in df.columns]
-    # prefer radiomics prefixes
     feat = [c for c in df.columns if isinstance(c, str) and c.startswith(prefixes)]
     if feat:
         return feat
-    # otherwise: use numeric columns excluding obvious metadata and label
     exclude = {label, "series_uid", "series", "patient_id", "dataset", "split", "mask_path", "image_path", "series_dir"}
     feat = [c for c in df.columns if c not in exclude]
     return feat
 
 
 def _group_kfold(groups: List[str], k: int, seed: int) -> List[Tuple[List[str], List[str]]]:
-    """
-    Simple group K-fold splitter without sklearn.
-    Returns list of (train_groups, val_groups).
-    """
     if k < 2:
         raise ValueError("k must be >= 2")
     rng = np.random.default_rng(seed)
@@ -123,6 +116,37 @@ def _group_kfold(groups: List[str], k: int, seed: int) -> List[Tuple[List[str], 
         tr = np.concatenate([folds[j] for j in range(k) if j != i]).tolist()
         out.append((tr, val))
     return out
+
+
+def _best_iteration(booster) -> int:
+    bi = getattr(booster, "best_iteration", None)
+    if bi is None:
+        return -1
+    try:
+        return int(bi)
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def _safe_iteration_range(booster, fallback_num_boost_round: int) -> Tuple[int, int]:
+    best_iter = _best_iteration(booster)
+    end = best_iter + 1 if best_iter >= 0 else -1
+    try:
+        if hasattr(booster, "num_boosted_rounds"):
+            n_rounds = int(booster.num_boosted_rounds())
+        else:
+            n_rounds = len(booster.get_dump())
+    except Exception:  # noqa: BLE001
+        try:
+            n_rounds = len(booster.get_dump())
+        except Exception:  # noqa: BLE001
+            n_rounds = int(fallback_num_boost_round)
+    if end <= 0:
+        end = n_rounds
+    end = min(int(end), int(n_rounds))
+    if end <= 0:
+        end = 1
+    return (0, int(end))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -159,7 +183,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not feature_cols:
         raise SystemExit(f"No feature columns found with prefixes={prefixes}")
 
-    # Drop rows without label
     d0 = len(df)
     df = df[df[args.label].notna()].copy()
     if len(df) == 0:
@@ -167,11 +190,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if len(df) != d0:
         print(f"Dropped {d0-len(df)} rows with missing label {args.label!r}")
 
-    # Task inference
     task = args.task
     y_raw = df[args.label]
     if task == "auto":
-        # Heuristic: bool or {0,1} -> binary; else regression
         if y_raw.dtype == bool:
             task = "binary"
         else:
@@ -189,7 +210,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         if len(part) == 0:
             raise SystemExit(f"Split {name!r} has 0 rows. Re-run prepare_xgb_dataset.py or adjust fractions.")
 
-    # Sanity check: no group leakage across splits (if group_col exists)
     if args.group_col in df.columns:
         gtr = set(tr[args.group_col].astype(str))
         gva = set(va[args.group_col].astype(str))
@@ -233,13 +253,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         nthread=min(30, (os.cpu_count() or 8)),
     )
     if task == "binary":
-        # IMPORTANT: AUC cannot be evaluated on a set with only one class; use logloss for early stopping in that case.
         eval_metric = "auc" if _has_both_classes(y_va) else "logloss"
         params.update(dict(objective="binary:logistic", eval_metric=eval_metric, scale_pos_weight=scale_pos_weight))
     else:
         params.update(dict(objective="reg:squarederror", eval_metric="rmse"))
 
-    # Optional group CV on train+val (test untouched)
     cv_summary: Dict[str, object] = {"ran": False}
     if args.cv_folds and args.cv_folds > 1:
         if args.group_col not in df.columns:
@@ -257,7 +275,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             Xva_f, yva_f = _xy(va_f)
             dtr = xgb.DMatrix(Xtr_f, label=ytr_f, feature_names=feature_cols)
             dva = xgb.DMatrix(Xva_f, label=yva_f, feature_names=feature_cols)
-            # Avoid AUC warnings when a fold has a single class.
             params_fold = dict(params)
             if task == "binary":
                 params_fold["eval_metric"] = "auc" if _has_both_classes(yva_f) else "logloss"
@@ -269,10 +286,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 early_stopping_rounds=int(args.early_stopping_rounds),
                 verbose_eval=False,
             )
-            p = booster.predict(dva, iteration_range=(0, int(getattr(booster, "best_iteration", 0)) + 1))
+            it_range_cv = _safe_iteration_range(booster, fallback_num_boost_round=int(args.num_boost_round))
+            p = booster.predict(dva, iteration_range=it_range_cv)
             if task == "binary":
                 aucs.append(_binary_auc(yva_f.astype(int), p) if _has_both_classes(yva_f) else float("nan"))
-            best_iters.append(int(getattr(booster, "best_iteration", -1) or -1))
+            best_iters.append(_best_iteration(booster))
             msg_auc = aucs[-1] if aucs else float("nan")
             print(f"[cv] fold {fold_i+1}/{len(splits)}: best_iter={best_iters[-1]} auc={msg_auc}", flush=True)
         cv_summary = {
@@ -285,7 +303,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             "best_iteration_median": int(np.median([b for b in best_iters if b >= 0])) if any(b >= 0 for b in best_iters) else -1,
         }
 
-    # Main train: train on train split, early stop on val
     dtr = xgb.DMatrix(X_tr, label=y_tr, feature_names=feature_cols)
     dva = xgb.DMatrix(X_va, label=y_va, feature_names=feature_cols)
     dte = xgb.DMatrix(X_te, label=y_te, feature_names=feature_cols)
@@ -297,8 +314,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         early_stopping_rounds=int(args.early_stopping_rounds),
         verbose_eval=False,
     )
-    best_iter = int(getattr(booster, "best_iteration", -1) or -1)
-    it_range = (0, best_iter + 1) if best_iter >= 0 else (0, int(args.num_boost_round))
+    best_iter = _best_iteration(booster)
+    it_range = _safe_iteration_range(booster, fallback_num_boost_round=int(args.num_boost_round))
 
     if task == "binary":
         p_va = booster.predict(dva, iteration_range=it_range)
@@ -330,7 +347,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             },
             "eval_metric_used": str(params.get("eval_metric")),
         }
-        # Save predictions for auditability
         pd.DataFrame({"p": p_te, "y": y_te.astype(int)}).to_csv(out_dir / "test_predictions.csv", index=False)
     else:
         pred_va = booster.predict(dva, iteration_range=it_range)
@@ -353,13 +369,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             "cv": cv_summary,
         }
 
-    # Save model + metrics
     model_path = out_dir / "model.json"
     booster.save_model(str(model_path))
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
 
-    # Feature importance (gain)
     try:
         gain = booster.get_score(importance_type="gain")
         fi = pd.DataFrame(
@@ -376,5 +390,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

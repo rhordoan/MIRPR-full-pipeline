@@ -568,7 +568,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--expr-index-csv",
         default=None,
-        help="GDC expression index CSV (default: <repo>/data/gdc/tcga_luad_expression_for_download/index.csv)",
+        help="GDC expression index CSV (default: <repo>/data/gdc/index.csv)",
     )
     ap.add_argument(
         "--expr-files-dir",
@@ -635,8 +635,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[warn] GDC /cases error {type(e).__name__}; continuing without clinical labels.", file=sys.stderr)
 
     # Expression labels (MKI67)
-    expr_index_csv = args.expr_index_csv or os.path.join(repo_root, "data", "gdc", "tcga_luad_expression_for_download", "index.csv")
-    expr_files_dir = args.expr_files_dir or os.path.join(repo_root, "data", "gdc", "downloads")
+    # Defaults match scripts/start_downloads_bg.sh:
+    # - index: <repo>/data/gdc/index.csv
+    # - files: <repo>/data/gdc/files/<file_id>/<file_name>
+    expr_index_csv = args.expr_index_csv or os.path.join(repo_root, "data", "gdc", "index.csv")
+    expr_files_dir = args.expr_files_dir or os.path.join(repo_root, "data", "gdc", "files")
     mki67_by_case = load_mki67_expression(expr_index_csv, expr_files_dir)
     if mki67_by_case:
         print(f"Expression: found MKI67 values for {sum(1 for v in mki67_by_case.values() if v.get('mki67') is not None)} cases", flush=True)
@@ -662,6 +665,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         clinical_row = clinical_by_barcode.get(s.patient_id) if clinical_by_barcode else None
         clinical = extract_clinical_fields(case, clinical_row)
         expr = mki67_by_case.get(s.patient_id) or {}
+        mki67_val = expr.get("mki67")
+        mki67_high = None
+        if mki67_val is not None and mki67_median is not None:
+            mki67_high = bool(mki67_val >= mki67_median)
         muts = mut_by_case.get(s.patient_id) or {}
 
         row = {
@@ -680,7 +687,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "mki67_expr_sample_type": expr.get("expr_sample_type"),
             "mki67_expr_file_id": expr.get("expr_file_id"),
             "mki67_expr_file_name": expr.get("expr_file_name"),
-            "mki67_high_median_split": (expr.get("mki67") is not None and mki67_median is not None and expr.get("mki67") >= mki67_median),
+            "mki67_high_median_split": mki67_high,
             "mki67_median_used": mki67_median,
             # Mutation flags: prefer clinical-table calls; optionally override/augment from MAF.
             # If MAF is provided, it will fill missing values; it won't overwrite non-null clinical-table calls.

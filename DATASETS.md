@@ -26,10 +26,10 @@ Notes:
 Recommended command (fast on GPU, safe defaults):
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/run_inference_on_series.py \
+python /home/shadeform/MIRPR-full-pipeline/scripts/run_inference_on_series.py \
   --series-dir /path/to/<SeriesUID> \
-  --weights /home/shadeform/models/vista-3d/weights/best_model.pth \
-  --out-dir /home/shadeform/models/vista-3d/outputs \
+  --weights /home/shadeform/MIRPR-full-pipeline/weights/best_model.pth \
+  --out-dir /home/shadeform/MIRPR-full-pipeline/outputs \
   --save-ct \
   --clean \
   --amp
@@ -52,7 +52,7 @@ Example (NSCLC Radiogenomics EGFR/KRAS):
 
 ```bash
 python scripts/label_stats.py \
-  --csv /home/shadeform/models/vista-3d/outputs/nsclc_radiogenomics_labels.csv \
+  --csv /home/shadeform/MIRPR-full-pipeline/outputs/nsclc_radiogenomics_labels.csv \
   --label-cols egfr_mutated,kras_mutated \
   --group-col patient_id
 ```
@@ -61,7 +61,7 @@ Example (TCGA-LUAD MKI67 expression proxy):
 
 ```bash
 python scripts/label_stats.py \
-  --csv /home/shadeform/models/vista-3d/outputs/tcga_luad_labels.csv \
+  --csv /home/shadeform/MIRPR-full-pipeline/outputs/tcga_luad_labels.csv \
   --label-cols mki67_expr \
   --group-col patient_id
 ```
@@ -69,25 +69,79 @@ python scripts/label_stats.py \
 ### 1) NSCLC Radiogenomics (TCIA)
 
 Downloads CT series from TCIA’s public NBIA API and extracts DICOMs into:
-`models/vista-3d/data/tcia/NSCLC Radiogenomics/<PatientID>/<StudyUID>/<SeriesUID>/`
+`/home/shadeform/MIRPR-full-pipeline/data/tcia/NSCLC Radiogenomics/<PatientID>/<StudyUID>/<SeriesUID>/`
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/download_nsclc_radiogenomics.py
+python /home/shadeform/MIRPR-full-pipeline/scripts/download_nsclc_radiogenomics.py
 ```
 
 Smoke-test (download only first 3 series):
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/download_nsclc_radiogenomics.py --max-series 3
+python /home/shadeform/MIRPR-full-pipeline/scripts/download_nsclc_radiogenomics.py --max-series 3
+```
+
+#### Working while downloads are still running (safe)
+
+The TCIA downloader writes a `.done` marker into each series directory once that series is fully downloaded + extracted.
+Downstream steps like labels / radiomics can safely run on the **completed** subset while the downloader keeps running.
+
+For example, to generate series-level EGFR/KRAS labels for whatever is complete *right now*:
+
+```bash
+source /home/shadeform/.venvs/vista-3d/bin/activate
+python /home/shadeform/MIRPR-full-pipeline/scripts/derive_nsclc_radiogenomics_labels.py \
+  --tcia-root /home/shadeform/MIRPR-full-pipeline/data/tcia \
+  --dataset 'NSCLC Radiogenomics' \
+  --labels-csv /home/shadeform/MIRPR-full-pipeline/data/labels/nsclc_radiogenomics/nsclc_radiogenomics_labels.csv \
+  --out-csv /home/shadeform/MIRPR-full-pipeline/outputs/nsclc_radiogenomics_labels.csv
+```
+
+#### Vista3D inference at scale (filtered for biomarker work)
+
+For biomarker modeling you typically want **one high-quality axial CT series per patient**
+(skip scouts/topograms and COR/SAG reformats). The parallel runner supports safe filtering:
+
+- `--require-done`: only series with `.done` marker (safe while downloads continue)
+- `--exclude-desc`: skip by `series.json` description substrings
+- `--min-slices`: skip tiny series
+- `--one-per-patient`: keep only one “best” series per patient
+- `--save-ct-fraction`: for radiomics, set **1.0** so every selected series has `*_ct_resampled.nii.gz`
+- Leave `--png` off unless you want QC images
+
+Example (NSCLC Radiogenomics, one per patient, radiomics-ready):
+
+```bash
+source /home/shadeform/.venvs/vista-3d/bin/activate
+OUT_DIR=/home/shadeform/MIRPR-full-pipeline/outputs/nsclc_radiogenomics_inference
+mkdir -p "$OUT_DIR"
+nohup python /home/shadeform/MIRPR-full-pipeline/scripts/run_all_inference_parallel.py \
+  --data-root "/home/shadeform/MIRPR-full-pipeline/data/tcia/NSCLC Radiogenomics" \
+  --out-dir "$OUT_DIR" \
+  --metrics "$OUT_DIR/metrics.csv" \
+  --workers 1 \
+  --weights /home/shadeform/MIRPR-full-pipeline/weights/best_model.pth \
+  --device cuda:0 \
+  --amp \
+  --require-done \
+  --one-per-patient \
+  --save-ct-fraction 1.0 \
+  > "$OUT_DIR/inference_bg.log" 2>&1 &
+```
+
+Monitor:
+
+```bash
+ls -1 "$OUT_DIR"/*_mask_clean.nii.gz 2>/dev/null | wc -l
 ```
 
 ### 2) TCGA-LUAD imaging (TCIA)
 
 Downloads CT series from the `TCGA-LUAD` TCIA collection and extracts DICOMs into:
-`models/vista-3d/data/tcia/TCGA-LUAD/<PatientID>/<StudyUID>/<SeriesUID>/`
+`/home/shadeform/MIRPR-full-pipeline/data/tcia/TCGA-LUAD/<PatientID>/<StudyUID>/<SeriesUID>/`
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/download_tcga_luad_tcia.py
+python /home/shadeform/MIRPR-full-pipeline/scripts/download_tcga_luad_tcia.py
 ```
 
 ### 3) TCGA-LUAD gene expression (GDC) — optional but recommended for Ki-67 (MKI67)
@@ -106,39 +160,39 @@ Create an ML-ready table (adds `patient_id`, `dataset`, and leakage-safe `split`
 
 ```bash
 source /home/shadeform/.venvs/vista-3d/bin/activate
-python /home/shadeform/models/vista-3d/scripts/prepare_xgb_dataset.py \
-  --radiomics-per-series-dir /home/shadeform/models/vista-3d/outputs/radiomics_per_series \
-  --tcia-root /home/shadeform/models/vista-3d/data/tcia \
-  --out-csv /home/shadeform/models/vista-3d/outputs/ml/radiomics_ml_table.csv
+python /home/shadeform/MIRPR-full-pipeline/scripts/prepare_xgb_dataset.py \
+  --radiomics-per-series-dir /home/shadeform/MIRPR-full-pipeline/outputs/radiomics_per_series \
+  --tcia-root /home/shadeform/MIRPR-full-pipeline/data/tcia \
+  --out-csv /home/shadeform/MIRPR-full-pipeline/outputs/ml/radiomics_ml_table.csv
 ```
 
 If you have labels CSV (example: TCGA-LUAD labels), you can join it at prep time:
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/prepare_xgb_dataset.py \
-  --radiomics-per-series-dir /home/shadeform/models/vista-3d/outputs/radiomics_per_series \
-  --labels-csv /home/shadeform/models/vista-3d/outputs/tcga_luad_labels_v3.csv \
-  --tcia-root /home/shadeform/models/vista-3d/data/tcia \
-  --out-csv /home/shadeform/models/vista-3d/outputs/ml/tcga_luad_radiomics_ml_table.csv \
+python /home/shadeform/MIRPR-full-pipeline/scripts/prepare_xgb_dataset.py \
+  --radiomics-per-series-dir /home/shadeform/MIRPR-full-pipeline/outputs/radiomics_per_series \
+  --labels-csv /home/shadeform/MIRPR-full-pipeline/outputs/tcga_luad_labels.csv \
+  --tcia-root /home/shadeform/MIRPR-full-pipeline/data/tcia \
+  --out-csv /home/shadeform/MIRPR-full-pipeline/outputs/ml/tcga_luad_radiomics_ml_table.csv \
   --dataset-filter 'TCGA-LUAD'
 ```
 
 Train an XGBoost model (example: EGFR mutation status):
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/train_xgboost.py \
-  --data /home/shadeform/models/vista-3d/outputs/ml/radiomics_ml_table.csv \
+python /home/shadeform/MIRPR-full-pipeline/scripts/train_xgboost.py \
+  --data /home/shadeform/MIRPR-full-pipeline/outputs/ml/radiomics_ml_table.csv \
   --label egfr_mutated \
-  --out-dir /home/shadeform/models/vista-3d/outputs/ml/models/egfr_mutated
+  --out-dir /home/shadeform/MIRPR-full-pipeline/outputs/ml/models/egfr_mutated
 ```
 
 Run training in the background with logs:
 
 ```bash
-bash /home/shadeform/models/vista-3d/scripts/start_xgb_training_bg.sh \
-  --data /home/shadeform/models/vista-3d/outputs/ml/radiomics_ml_table.csv \
+bash /home/shadeform/MIRPR-full-pipeline/scripts/start_xgb_training_bg.sh \
+  --data /home/shadeform/MIRPR-full-pipeline/outputs/ml/radiomics_ml_table.csv \
   --label egfr_mutated \
-  --out-dir /home/shadeform/models/vista-3d/outputs/ml/models/egfr_mutated
+  --out-dir /home/shadeform/MIRPR-full-pipeline/outputs/ml/models/egfr_mutated
 ```
 
 ### 8) NSCLC Radiogenomics labels (EGFR/KRAS + clinical)
@@ -166,26 +220,31 @@ python /home/shadeform/models/vista-3d/scripts/derive_nsclc_radiogenomics_labels
 (default: `Gene Expression Quantification` + `STAR - Counts`).
 
 ```bash
-mkdir -p /home/shadeform/models/vista-3d/data/gdc
-python /home/shadeform/models/vista-3d/scripts/gdc_tcga_luad_manifest.py --out-dir /home/shadeform/models/vista-3d/data/gdc
+mkdir -p /home/shadeform/MIRPR-full-pipeline/data/gdc
+python /home/shadeform/MIRPR-full-pipeline/scripts/gdc_tcga_luad_manifest.py --out-dir /home/shadeform/MIRPR-full-pipeline/data/gdc
 ```
 
 Install `gdc-client` (optional helper):
 
 ```bash
-bash /home/shadeform/models/vista-3d/scripts/install_gdc_client.sh
+bash /home/shadeform/MIRPR-full-pipeline/scripts/install_gdc_client.sh
 ```
 
 Download the files (uses the manifest created above):
 
 ```bash
-/home/shadeform/models/vista-3d/bin/gdc-client download -m /home/shadeform/models/vista-3d/data/gdc/manifest.tsv -d /home/shadeform/models/vista-3d/data/gdc/files
+/home/shadeform/MIRPR-full-pipeline/bin/gdc-client download \
+  -m /home/shadeform/MIRPR-full-pipeline/data/gdc/manifest.tsv \
+  -d /home/shadeform/MIRPR-full-pipeline/data/gdc/files
 ```
 
 If you’re downloading *controlled* file types, you will need a token:
 
 ```bash
-/home/shadeform/models/vista-3d/bin/gdc-client download -t /path/to/gdc_token.txt -m /home/shadeform/models/vista-3d/data/gdc/manifest.tsv -d /home/shadeform/models/vista-3d/data/gdc/files
+/home/shadeform/MIRPR-full-pipeline/bin/gdc-client download \
+  -t /path/to/gdc_token.txt \
+  -m /home/shadeform/MIRPR-full-pipeline/data/gdc/manifest.tsv \
+  -d /home/shadeform/MIRPR-full-pipeline/data/gdc/files
 ```
 
 ### 4) TCGA-LUAD labels (clinical + optional MKI67 + optional EGFR/KRAS)
@@ -203,18 +262,18 @@ per-series inference outputs and per-series radiomics JSONs):
 Run:
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/derive_tcga_luad_labels.py \
-  --tcia-collection-dir /home/shadeform/models/vista-3d/data/tcia/TCGA-LUAD \
-  --out-csv /home/shadeform/models/vista-3d/outputs/tcga_luad_labels.csv
+python /home/shadeform/MIRPR-full-pipeline/scripts/derive_tcga_luad_labels.py \
+  --tcia-collection-dir /home/shadeform/MIRPR-full-pipeline/data/tcia/TCGA-LUAD \
+  --out-csv /home/shadeform/MIRPR-full-pipeline/outputs/tcga_luad_labels.csv
 ```
 
 If you only want labels for the subset you already ran inference on, pass `--outputs-dir`:
 
 ```bash
-python /home/shadeform/models/vista-3d/scripts/derive_tcga_luad_labels.py \
-  --tcia-collection-dir /home/shadeform/models/vista-3d/data/tcia/TCGA-LUAD \
-  --outputs-dir /home/shadeform/models/vista-3d/outputs \
-  --out-csv /home/shadeform/models/vista-3d/outputs/tcga_luad_labels_segmented_only.csv
+python /home/shadeform/MIRPR-full-pipeline/scripts/derive_tcga_luad_labels.py \
+  --tcia-collection-dir /home/shadeform/MIRPR-full-pipeline/data/tcia/TCGA-LUAD \
+  --outputs-dir /home/shadeform/MIRPR-full-pipeline/outputs \
+  --out-csv /home/shadeform/MIRPR-full-pipeline/outputs/tcga_luad_labels_segmented_only.csv
 ```
 
 Note: `--outputs-dir` filters by series UIDs present in files like `*_ct_resampled.nii.gz` / `*_mask_clean.nii.gz`.
@@ -228,22 +287,22 @@ This launches:
 - GDC manifest generation for **TCGA-LUAD** expression (fast)
 
 ```bash
-bash /home/shadeform/models/vista-3d/scripts/start_downloads_bg.sh
+bash /home/shadeform/MIRPR-full-pipeline/scripts/start_downloads_bg.sh
 ```
 
 Logs will be in:
-`/home/shadeform/models/vista-3d/logs/latest/*.log`
+`/home/shadeform/MIRPR-full-pipeline/logs/latest/*.log`
 
 Monitor:
 
 ```bash
-tail -f /home/shadeform/models/vista-3d/logs/latest/tcia_nsclc_radiogenomics.log
+tail -f /home/shadeform/MIRPR-full-pipeline/logs/latest/tcia_nsclc_radiogenomics.log
 ```
 
 Stop all started jobs:
 
 ```bash
-bash /home/shadeform/models/vista-3d/scripts/stop_downloads_bg.sh
+bash /home/shadeform/MIRPR-full-pipeline/scripts/stop_downloads_bg.sh
 ```
 
 

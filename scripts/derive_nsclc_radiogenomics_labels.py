@@ -55,6 +55,10 @@ def build_tcia_series_index(tcia_root: str) -> pd.DataFrame:
         base = os.path.basename(dirpath)
         if not SERIES_UID_RE.match(base):
             continue
+        # TCIA downloader writes <series_dir>/.done when extraction is complete.
+        # This lets us safely run labels/radiomics while downloads are still in progress.
+        if not os.path.exists(os.path.join(dirpath, ".done")):
+            continue
         series_uid = base
         rel = Path(dirpath).resolve().relative_to(tcia_root_p)
         parts = rel.parts
